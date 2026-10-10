@@ -221,6 +221,7 @@ footer p { margin: 0; max-width: 76ch; }
           <button type="button" id="sortTrees" aria-pressed="false">본수 많은 순</button>
         </div>
         <button type="button" id="copySum">표 복사</button>
+        <button type="button" id="xlsxSum" hidden>엑셀 저장</button>
       </div>
     </div>
     <div class="table-box"><table class="sum" id="sumTable"></table></div>
@@ -236,7 +237,7 @@ footer p { margin: 0; max-width: 76ch; }
           <option value="age">수령 많은 순</option>
         </select>
         <button type="button" id="copyList">목록 복사</button>
-        <button type="button" id="csvList" hidden>CSV 저장</button>
+        <button type="button" id="xlsxList" hidden>엑셀 저장</button>
       </div>
     </div>
     <textarea class="copybox" id="copyListBox" readonly hidden aria-label="복사할 목록"></textarea>
@@ -549,28 +550,80 @@ footer p { margin: 0; max-width: 76ch; }
       { lot: "지번 일치", ri: "같은 리·수종 (참고)" }[r.cmatch] || "좌표 없음", [r.cst && r.cst !== "원자료" ? r.cst : "", r.cnote].filter(Boolean).join(" · "),
     ]));
   }
+  // 엑셀이 숫자로 읽어도 되는 열. 나머지(지정번호·지정일·소재지 등)는 모두 텍스트로 넘겨
+  // "2-12-1" 같은 지정번호가 엑셀에서 날짜(2002-12-01)로 바뀌지 않게 한다.
+  const NUMERIC_COLS = new Set(["본수", "지정 건수", "수령(년)", "최고 수령(년)", "수고(m)", "흉고둘레(cm)", "위도", "경도"]);
+  const isNum = (v) => typeof v === "number" || /^-?\d+(\.\d+)?$/.test(String(v ?? ""));
+  const numericAt = (head) => head.map((h) => NUMERIC_COLS.has(h));
   const toTsv = (data) => data.map((r) => r.map((c) => String(c ?? "").replace(/[\t\n]/g, " ")).join("\t")).join("\n");
+  function toHtml(data) {
+    const num = numericAt(data[0]);
+    const td = (v, k) => (num[k] && isNum(v) ? `<td>${esc(v)}</td>` : `<td style="mso-number-format:'\\@'">${esc(v ?? "")}</td>`);
+    return `<table><tr>${data[0].map((h) => `<th>${esc(h)}</th>`).join("")}</tr>`
+      + data.slice(1).map((r) => `<tr>${r.map(td).join("")}</tr>`).join("") + "</table>";
+  }
   function copy(btn, box, data, label) {
     const tsv = toTsv(data);
     const done = () => { btn.textContent = `복사됨 · ${fmt(data.length - 1)}행`; setTimeout(() => { btn.textContent = label; }, 2200); };
     const fallback = () => { box.hidden = false; box.value = tsv; box.focus(); box.select(); btn.textContent = "Ctrl+C로 복사하세요"; setTimeout(() => { btn.textContent = label; }, 3000); };
-    try { navigator.clipboard.writeText(tsv).then(done, fallback); } catch (e) { fallback(); }
+    const plain = () => navigator.clipboard.writeText(tsv).then(done, fallback);
+    try {
+      // 서식 있는 표(HTML)도 함께 넣어 엑셀에 붙일 때 텍스트 칸이 날짜로 바뀌지 않게 한다
+      if (window.ClipboardItem && navigator.clipboard.write) {
+        const item = new ClipboardItem({
+          "text/html": new Blob([toHtml(data)], { type: "text/html" }),
+          "text/plain": new Blob([tsv], { type: "text/plain" }),
+        });
+        navigator.clipboard.write([item]).then(done, plain);
+      } else plain();
+    } catch (e) { fallback(); }
   }
   $("copySum").addEventListener("click", () => copy($("copySum"), $("copySumBox"), sumRows(), "표 복사"));
   $("copyList").addEventListener("click", () => copy($("copyList"), $("copyListBox"), listRows(), "목록 복사"));
 
+  // 엑셀 저장: SheetJS를 처음 누를 때만 불러와 .xlsx로 만든다 (직접 배포한 페이지에서만 보임)
+  let xlsxLib = null;
+  function loadXlsx() {
+    if (!xlsxLib && window.XLSX) xlsxLib = Promise.resolve(window.XLSX);
+    if (!xlsxLib) {
+      xlsxLib = new Promise((resolve, reject) => {
+        const sc = document.createElement("script");
+        sc.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+        sc.onload = () => resolve(window.XLSX);
+        sc.onerror = () => { xlsxLib = null; reject(new Error("load")); };
+        document.head.appendChild(sc);
+      });
+    }
+    return xlsxLib;
+  }
+  async function saveXlsx(btn, data, label, sheet) {
+    btn.textContent = "만드는 중…";
+    try {
+      const XLSX = await loadXlsx();
+      const num = numericAt(data[0]);
+      const aoa = data.map((r, i) => (i === 0 ? r : r.map((v, k) => (v === "" || v == null ? null : num[k] && isNum(v) ? Number(v) : String(v)))));
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws["!cols"] = data[0].map((h, k) => {
+        const longest = Math.max(String(h).length, ...data.slice(1, 300).map((r) => String(r[k] ?? "").length));
+        return { wch: Math.min(40, Math.max(6, Math.round(longest * 1.6))) };
+      });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, sheet);
+      XLSX.writeFile(wb, `보호수_${regionName().replace(/\s+/g, "_")}_${sheet.replace(/\s+/g, "")}.xlsx`);
+      btn.textContent = label;
+    } catch (e) {
+      btn.textContent = "저장하지 못했습니다";
+      setTimeout(() => { btn.textContent = label; }, 3000);
+    }
+  }
+
   let framed = true;
   try { framed = window.self !== window.top; } catch (e) { framed = true; }
   if (!framed) {
-    $("csvList").hidden = false;
-    $("csvList").addEventListener("click", () => {
-      const csv = listRows().map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
-      const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
-      const a = document.createElement("a");
-      a.href = url; a.download = `보호수_${regionName().replace(/\s+/g, "_")}.csv`;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    });
+    $("xlsxList").hidden = false;
+    $("xlsxSum").hidden = false;
+    $("xlsxList").addEventListener("click", () => saveXlsx($("xlsxList"), listRows(), "엑셀 저장", "보호수 목록"));
+    $("xlsxSum").addEventListener("click", () => saveXlsx($("xlsxSum"), sumRows(), "엑셀 저장", "현황표"));
   }
 
   $("eyebrow").textContent = `${D.source} · 전국 ${fmt(D.total)}본 · 지정 ${fmt(rows.length)}건`;
