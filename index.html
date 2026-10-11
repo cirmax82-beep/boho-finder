@@ -630,6 +630,21 @@ footer p { margin: 0; max-width: 76ch; }
   $("source").textContent = `자료: ${D.source}. 지정 ${fmt(rows.length)}건, ${fmt(D.total)}본.`
     + (D.coordSource ? ` 좌표: ${D.coordSource}.` : "");
   $("coordNote").hidden = !D.coordSource;
+  // 다른 페이지(환경 지구·지역 현황 등)에서 ?sido=…&sgg=… 로 열면 그 지역을 바로 보여준다
+  (function openFromQuery() {
+    let q;
+    try { q = new URLSearchParams(location.search); } catch (e) { return; }
+    let sido = q.get("sido") || "";
+    const sgg = q.get("sgg") || "";
+    if (!sido) return;
+    if (sido === "전남광주통합특별시") sido = ["동구", "서구", "남구", "북구", "광산구"].includes(sgg) ? "광주광역시" : "전라남도";
+    const inSido = rows.filter((r) => r.sido === sido);
+    if (!inSido.length) return;
+    const names = new Set(inSido.map((r) => r.sgg));
+    const city = sgg.split(" ")[0];
+    state.sido = sido;
+    state.sgg = names.has(sgg) ? sgg : names.has(city) ? city : sidoHasNoSgg(sido) ? "" : null;
+  })();
   fillSpecies();
   syncSelects();
   render();
